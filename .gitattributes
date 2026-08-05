@@ -1,3 +1,0 @@
-# Normalize line endings: store and check out all text files with LF
-# (Linux CI expects LF; keeps diffs clean across Windows/macOS contributors)
-* text=auto eol=lf
