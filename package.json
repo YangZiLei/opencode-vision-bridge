@@ -1,0 +1,16 @@
+{
+  "name": "opencode-vision-bridge",
+  "version": "1.0.1",
+  "description": "Give text-only opencode models vision — bridge images to a free MiMo V2.5 multimodal subagent",
+  "keywords": ["opencode", "plugin", "vision", "image", "multimodal", "deepseek", "bridge", "subagent"],
+  "license": "MIT",
+  "author": "opencode-vision-bridge contributors",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "check": "node --check plugins/vision-bridge.mjs",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "private": true
+}
