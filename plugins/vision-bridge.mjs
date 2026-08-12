@@ -105,6 +105,32 @@ function dedupeImage(buffer) {
   return null
 }
 
+/**
+ * Persist a pasted image to the runtime dir, deduping identical content.
+ * The hash index is backfilled right after the write so concurrent
+ * transform invocations reuse the same file instead of writing duplicates.
+ */
+function persistImage(buffer, name) {
+  const existing = dedupeImage(buffer)
+  if (existing) {
+    log("  deduped image ->", existing)
+    return existing
+  }
+  const hash = createHash("sha256").update(buffer).digest("hex")
+  const filePath = join(
+    RUNTIME_DIR,
+    `${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${name || "image.png"}`
+  )
+  try {
+    writeFileSync(filePath, buffer)
+    hashIndex.set(hash, filePath)
+    log("  wrote", filePath)
+    return filePath
+  } catch {
+    return ""
+  }
+}
+
 let textPatterns = null
 
 function loadTextPatterns() {
@@ -201,43 +227,15 @@ export const VisionBridge = async () => {
             } else if (String(p.url ?? "").startsWith("data:")) {
               const decoded = decodeDataUri(String(p.url))
               if (decoded) {
-                const existing = dedupeImage(decoded.buffer)
-                if (existing) {
-                  filePath = existing
-                  log("  deduped image ->", existing)
-                } else {
-                  const name = String(p.filename ?? `pasted-${Date.now()}`).replace(/[^\w.\-]/g, "_")
-                  filePath = join(
-                    RUNTIME_DIR,
-                    `${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${name || "image.png"}`
-                  )
-                  try {
-                    writeFileSync(filePath, decoded.buffer)
-                    log("  wrote", filePath)
-                  } catch {
-                    filePath = ""
-                  }
-                }
+                const name = String(p.filename ?? `pasted-${Date.now()}`).replace(/[^\w.\-]/g, "_")
+                filePath = persistImage(decoded.buffer, name)
               }
             }
           } else if (part.type === "image") {
             const src = String(p.image ?? "")
             const decoded = src.startsWith("data:") ? decodeDataUri(src) : null
             if (decoded) {
-              const existing = dedupeImage(decoded.buffer)
-              if (existing) {
-                filePath = existing
-              } else {
-                filePath = join(
-                  RUNTIME_DIR,
-                  `${Date.now()}-${Math.random().toString(36).slice(2, 6)}-pasted.${decoded.ext}`
-                )
-                try {
-                  writeFileSync(filePath, decoded.buffer)
-                } catch {
-                  filePath = ""
-                }
-              }
+              filePath = persistImage(decoded.buffer, `pasted.${decoded.ext}`)
             }
           }
 
