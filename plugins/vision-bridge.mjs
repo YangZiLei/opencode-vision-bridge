@@ -202,6 +202,36 @@ function matchTextModel(patterns, providerID, modelID) {
   return false
 }
 
+/**
+ * Single source of truth for "should this model's images be bridged?"
+ * Used by BOTH hooks so the delegation rule and the bridge decision always
+ * agree (a model is never told to delegate while its images pass natively).
+ *
+ * Priority:
+ *   1. forceBridge list  -> always bridge (metadata claims image but fails)
+ *   2. known modality    -> bridge iff text-only
+ *   3. unknown modality  -> bridge iff in the text blacklist (conservative:
+ *                           a possibly-vision model is passed through)
+ */
+function decideBridge(providerID, modelID, caps) {
+  loadTextPatterns()
+  if (matchTextModel(forceBridgePatterns, providerID, modelID)) {
+    return { bridge: true, reason: "forceBridge match" }
+  }
+  const known =
+    !!caps && (typeof caps.input?.image === "boolean" || typeof caps.attachment === "boolean")
+  if (known) {
+    if (declaresImageInput(caps)) {
+      return { bridge: false, reason: "runtime caps: image input supported" }
+    }
+    return { bridge: true, reason: "runtime caps: text-only" }
+  }
+  if (matchTextModel(textPatterns, providerID, modelID)) {
+    return { bridge: true, reason: "in text blacklist" }
+  }
+  return { bridge: false, reason: "not in text blacklist (modality unknown or cache miss)" }
+}
+
 function decodeDataUri(dataUri) {
   const m = /^data:([^;]+);base64,(.*)$/s.exec(dataUri)
   if (!m) return null
@@ -224,14 +254,12 @@ export const VisionBridge = async () => {
     // blacklist on cache miss so bridging survives any hook-order change.
     "experimental.chat.system.transform": async (input, output) => {
       rememberCaps(input?.model)
-      // Text-only models get a mandatory delegation rule. The bridged text
-      // part alone is advisory and weak models (e.g. big-pickle) ignore it.
-      // Uses the SAME predicate as messages.transform so an attachment-capable
-      // model never gets a contradictory "image supported" + "must delegate".
-      const caps = input?.model?.capabilities
-      loadTextPatterns() // ensure forceBridgePatterns initialized
-      const forced = matchTextModel(forceBridgePatterns, input?.model?.providerID, input?.model?.id)
-      if ((caps && !declaresImageInput(caps)) || forced) {
+      // Inject the mandatory delegation rule for exactly the models whose
+      // images messages.transform will bridge — via the SAME decideBridge()
+      // used there, so a model is never told "you cannot see images" while
+      // its image parts are passed through natively.
+      const { bridge } = decideBridge(input?.model?.providerID, input?.model?.id, input?.model?.capabilities)
+      if (bridge) {
         output.system.push(
           "IMAGE DELEGATION RULE (mandatory): If a user message contains " +
           '"[Image attachment: <file path>]", this model cannot see the image ' +
@@ -256,50 +284,13 @@ export const VisionBridge = async () => {
       const modelKey = `${targetModel.providerID}/${targetModel.modelID}`
       log("transform fired for", modelKey)
 
-      // Force-bridge models whose metadata CLAIMS image support but which
-      // actually fail on image input (e.g. muse-spark-1.2). This overrides
-      // capability detection so the vision subagent handles them reliably.
-      if (matchTextModel(forceBridgePatterns, targetModel.providerID, targetModel.modelID)) {
-        log("  forceBridge match, BRIDGING image")
-        return bridgeImageParts(output)
-      }
-
-      // Primary decision: runtime capabilities captured from
-      // system.transform for THIS provider/model. Zero-config — no
-      // blacklist maintenance needed. A modality is "known" only when the
-      // metadata carries an explicit boolean for image or attachment; if the
-      // provider omits modality info entirely (some custom OpenAI-compatible
-      // providers), don't guess text-only — fall through to the blacklist
-      // decision below so an unknown vision model is never silently bridged
-      // to the subagent.
-      const caps = capsCache.get(modelKey)
-      const modalityKnown =
-        caps && (typeof caps.input?.image === "boolean" || typeof caps.attachment === "boolean")
-      if (modalityKnown) {
-        if (declaresImageInput(caps)) {
-          log("  runtime caps: image input supported, PASS")
-          return
-        }
-        log("  runtime caps: text-only, BRIDGING image")
-        return bridgeImageParts(output)
-      }
-      if (caps) log("  runtime caps: input modality unknown, falling back to blacklist")
-
-      // Fallback (cache miss): legacy blacklist behavior so bridging still
-      // works if the hook order ever changes or state was evicted.
-      const capsFromMsg =
-        targetModel.capabilities?.input?.image === true ||
-        targetModel.modalities?.input?.includes("image") === true
-      if (capsFromMsg) {
-        log("  msg carries image capability, PASS")
-        return
-      }
-      if (!matchTextModel(loadTextPatterns(), targetModel.providerID, targetModel.modelID)) {
-        log("  not in text blacklist, PASS")
-        return
-      }
-      log("  in text blacklist, BRIDGING image")
-      bridgeImageParts(output)
+      const { bridge, reason } = decideBridge(
+        targetModel.providerID,
+        targetModel.modelID,
+        capsCache.get(modelKey),
+      )
+      log(" ", reason + (bridge ? ", BRIDGING image" : ", PASS"))
+      if (bridge) bridgeImageParts(output)
     },
   }
 }

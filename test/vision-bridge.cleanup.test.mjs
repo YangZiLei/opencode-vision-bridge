@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import test from "node:test"
+import test, { after } from "node:test"
 
 // Isolate from the real production temp dir.
 const TEST_RUNTIME = join(tmpdir(), `opencode-vision-test-cleanup-${Date.now()}`)
@@ -28,9 +28,10 @@ utimesSync(stale, tenDaysAgo, tenDaysAgo)
 
 const hooks = await VisionBridge() // triggers load-time cleanup
 
+after(() => rmSync(TEST_RUNTIME, { recursive: true, force: true }))
+
 test("cleans stale temp images but keeps fresh ones", async () => {
   assert.equal(existsSync(stale), false, "stale file (>24h) should be removed")
   assert.equal(existsSync(fresh), true, "fresh file should be kept")
   unlinkSync(fresh)
-  rmSync(TEST_RUNTIME, { recursive: true, force: true })
 })

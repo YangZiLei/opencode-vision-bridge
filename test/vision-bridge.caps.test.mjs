@@ -104,6 +104,34 @@ test("falls back to blacklist when metadata omits input modality", async () => {
   assert.equal(output.messages[0].parts[0].type, "file", "unknown modality should pass through (blacklist miss)")
 })
 
+test("unknown modality does NOT get a delegation rule (system hook)", async () => {
+  // The system hook must stay consistent with messages.transform: a model
+  // whose images pass through natively must not be told to delegate.
+  const out = { system: [] }
+  await systemTransform(
+    { model: modelObj("custom", "unknown-vision-model", { input: {}, output: {} }) },
+    out,
+  )
+  assert.equal(out.system.length, 0, "unknown modality + blacklist miss must not inject delegation rule")
+})
+
+test("unknown modality + blacklisted gets delegation rule and bridges", async () => {
+  // Unknown modality but in the text blacklist (deepseek) — both hooks must
+  // agree: rule injected AND image bridged.
+  const out = { system: [] }
+  await systemTransform(
+    { model: modelObj("opencode-go", "deepseek-v4-flash", { input: {}, output: {} }) },
+    out,
+  )
+  assert.ok(
+    out.system.some((s) => s.includes("IMAGE DELEGATION RULE")),
+    "unknown modality + blacklisted should get delegation rule",
+  )
+  const output = userMsg("opencode-go", "deepseek-v4-flash", [filePart()])
+  await transform({}, output)
+  assert.equal(output.messages[0].parts[0].type, "text", "unknown modality + blacklisted should bridge")
+})
+
 test("attachment-capable model gets a consistent single decision", async () => {
   // attachment:true but input.image:false must neither be bridged nor given
   // a delegation rule — both predicates must agree via declaresImageInput.
