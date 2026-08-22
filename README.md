@@ -79,7 +79,7 @@ ERROR: Cannot read "image.png" (this model does not support image input).
 
 ### 2. 注册插件（必须）
 
-opencode 对全局 `plugins/` 目录下的文件**不会自动发现**，必须在 `opencode.json` 的 `plugin` 数组中显式声明：
+推荐在 `opencode.json` 的 `plugin` 数组中**显式声明**插件路径（最稳妥，不依赖版本行为差异）：
 
 ```json
 {
@@ -138,7 +138,7 @@ opencode 对全局 `plugins/` 目录下的文件**不会自动发现**，必须�
 **Key 在哪里配置？** 取决于模型所属的 provider：
 
 - **`opencode` provider（免费模型）**：无需配置 key，opencode 内置免费模型开箱即用（如 `opencode/mimo-v2.5-free`）。
-- **`opencode-go` provider（付费套餐）**：需要先订阅 opencode Go 套餐。推荐通过下方链接订阅（可获 $5 使用额度）：
+- **`opencode-go` provider（付费套餐）**：需要先订阅 opencode Go 套餐。可通过下方链接订阅（含返利码，订阅后双方均可获 $5 使用额度）：
   ```
   https://opencode.ai/go?ref=D0HTW594YM
   ```

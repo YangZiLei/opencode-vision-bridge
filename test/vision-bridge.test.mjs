@@ -1,19 +1,25 @@
 import assert from "node:assert/strict"
-import { existsSync, unlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import test from "node:test"
+import test, { after } from "node:test"
 
 process.env.VISION_BRIDGE_CONFIG = fileURLToPath(
   new URL("../plugins/text-models.json", import.meta.url),
 )
+// Isolate from the real production temp dir.
+const TEST_RUNTIME = join(tmpdir(), `opencode-vision-test-main-${Date.now()}`)
+process.env.VISION_BRIDGE_RUNTIME_DIR = TEST_RUNTIME
+mkdirSync(TEST_RUNTIME, { recursive: true })
 
 const { VisionBridge } = await import("../plugins/vision-bridge.mjs")
 const hooks = await VisionBridge()
 const transform = hooks["experimental.chat.messages.transform"]
 const image = "data:image/png;base64,aGVsbG8="
-const RUNTIME_DIR = join(tmpdir(), "opencode-vision")
+const RUNTIME_DIR = TEST_RUNTIME
+
+after(() => rmSync(TEST_RUNTIME, { recursive: true, force: true }))
 
 function message(providerID, modelID, parts) {
   return {

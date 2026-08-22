@@ -5,11 +5,13 @@
  * process images. opencode rejects image attachments BEFORE sending them to the
  * model, surfacing "this model does not support image input".
  *
- * Solution: for models listed in the text-only blacklist (text-models.json),
- * replace image parts with a text part that carries the image file path. The
+ * Solution: two hooks. experimental.chat.system.transform captures the current
+ * model's runtime capabilities (capabilities.input.image) and, for text-only
+ * models, injects a mandatory delegation rule into the system prompt; the
  * main model then dispatches to a vision subagent (opencode/mimo-v2.5-free)
- * to recognize the image. All other models are left untouched — real vision
- * models (qwen3.x, MiMo, Claude, GPT, ...) see images natively.
+ * which reads the image path and returns a description. Visual models are
+ * left untouched — they see images natively. text-models.json is only a
+ * fallback used when the capability cache misses.
  *
  * Two image sources are covered:
  *   1. File path (opencode run -f, tool output referencing a local image)
@@ -20,7 +22,7 @@
  * Housekeeping:
  *   - Temp images expire after 24h (configurable via VISION_BRIDGE_MAX_AGE_HOURS)
  *   - Duplicate pastes are deduplicated by SHA-256 content hash
- *   - Cleanup runs at most once every 3 days
+ *   - Cleanup runs at most once every 3 days, and once on plugin load
  *
  * When another text-only model reports "does not support image input", add it
  * to text-models.json (glob patterns supported, e.g. the deepseek family).
@@ -46,11 +48,15 @@ const CONFIG_PATH =
   process.env.VISION_BRIDGE_CONFIG ||
   join(homedir(), ".config", "opencode", "plugins", "text-models.json")
 
-// Temp image retention — overridable via VISION_BRIDGE_MAX_AGE_HOURS
+// Temp image retention — overridable via VISION_BRIDGE_MAX_AGE_HOURS.
+// Clamped to >= 0; 0 = retain nothing (clean immediately).
+const maxAgeHours = Number(process.env.VISION_BRIDGE_MAX_AGE_HOURS)
 const MAX_AGE_MS =
-  (Number(process.env.VISION_BRIDGE_MAX_AGE_HOURS) || 24) * 60 * 60 * 1000
+  (Number.isFinite(maxAgeHours) && maxAgeHours >= 0 ? maxAgeHours : 24) * 60 * 60 * 1000
 
-const RUNTIME_DIR = join(tmpdir(), "opencode-vision")
+// Runtime dir — overridable so tests can isolate from the real temp dir.
+const RUNTIME_DIR =
+  process.env.VISION_BRIDGE_RUNTIME_DIR || join(tmpdir(), "opencode-vision")
 const CLEAN_THROTTLE_MS = 3 * 24 * 60 * 60 * 1000 // cleanup at most once per 3 days
 
 const DEBUG = process.env.VISION_BRIDGE_DEBUG === "1"
@@ -90,7 +96,7 @@ function cleanOldImages() {
   const now = Date.now()
   if (now - lastCleanTime < CLEAN_THROTTLE_MS) return
   try {
-    mkdirSync(RUNTIME_DIR, { recursive: true })
+    mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 })
     for (const name of readdirSync(RUNTIME_DIR)) {
       const full = join(RUNTIME_DIR, name)
       try {
@@ -146,7 +152,7 @@ function persistImage(buffer, name) {
     `${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${name || "image.png"}`
   )
   try {
-    writeFileSync(filePath, buffer)
+    writeFileSync(filePath, buffer, { mode: 0o600 })
     hashIndex.set(hash, filePath)
     log("  wrote", filePath)
     return filePath
@@ -204,15 +210,20 @@ function decodeDataUri(dataUri) {
 
 export const VisionBridge = async () => {
   log("plugin loaded")
+  cleanOldImages() // P2-9: expire leftovers even if no new bridging happens
   return {
     // Fires before messages.transform on every LLM call with the FULL Model
-    // object — our source of runtime truth for input modality.
+    // object — our source of runtime truth for input modality. Ordering
+    // verified on opencode 1.18.x; messages.transform still falls back to the
+    // blacklist on cache miss so bridging survives any hook-order change.
     "experimental.chat.system.transform": async (input, output) => {
       rememberCaps(input?.model)
       // Text-only models get a mandatory delegation rule. The bridged text
       // part alone is advisory and weak models (e.g. big-pickle) ignore it.
+      // Uses the SAME predicate as messages.transform so an attachment-capable
+      // model never gets a contradictory "image supported" + "must delegate".
       const caps = input?.model?.capabilities
-      if (caps && caps.input?.image !== true) {
+      if (caps && !declaresImageInput(caps)) {
         output.system.push(
           "IMAGE DELEGATION RULE (mandatory): If a user message contains " +
           '"[Image attachment: <file path>]", this model cannot see the image ' +
@@ -239,9 +250,16 @@ export const VisionBridge = async () => {
 
       // Primary decision: runtime capabilities captured from
       // system.transform for THIS provider/model. Zero-config — no
-      // blacklist maintenance needed.
+      // blacklist maintenance needed. A modality is "known" only when the
+      // metadata carries an explicit boolean for image or attachment; if the
+      // provider omits modality info entirely (some custom OpenAI-compatible
+      // providers), don't guess text-only — fall through to the blacklist
+      // decision below so an unknown vision model is never silently bridged
+      // to the subagent.
       const caps = capsCache.get(modelKey)
-      if (caps) {
+      const modalityKnown =
+        caps && (typeof caps.input?.image === "boolean" || typeof caps.attachment === "boolean")
+      if (modalityKnown) {
         if (declaresImageInput(caps)) {
           log("  runtime caps: image input supported, PASS")
           return
@@ -249,6 +267,7 @@ export const VisionBridge = async () => {
         log("  runtime caps: text-only, BRIDGING image")
         return bridgeImageParts(output)
       }
+      if (caps) log("  runtime caps: input modality unknown, falling back to blacklist")
 
       // Fallback (cache miss): legacy blacklist behavior so bridging still
       // works if the hook order ever changes or state was evicted.
@@ -273,29 +292,37 @@ export const VisionBridge = async () => {
 function bridgeImageParts(output) {
   cleanOldImages()
   try {
-    mkdirSync(RUNTIME_DIR, { recursive: true })
+    mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 })
   } catch {}
 
   for (const msg of output.messages) {
-    for (const part of msg.parts) {
+    for (const part of msg.parts ?? []) {
       const p = part
       let filePath = ""
 
-      if (part.type === "file" && IMAGE_MIME_RE.test(String(p.mime ?? ""))) {
-        if (p.path) {
+      if (part.type === "file") {
+        if (!IMAGE_MIME_RE.test(String(p.mime ?? ""))) {
+          log("  skip non-image file part")
+        } else if (p.path) {
           filePath = p.path
         } else if (String(p.url ?? "").startsWith("data:")) {
           const decoded = decodeDataUri(String(p.url))
           if (decoded) {
             const name = String(p.filename ?? `pasted-${Date.now()}`).replace(/[^\w.\-]/g, "_")
             filePath = persistImage(decoded.buffer, name)
+          } else {
+            log("  skip undecodable data URI")
           }
+        } else {
+          log("  skip file part without local path or data URI")
         }
       } else if (part.type === "image") {
         const src = String(p.image ?? "")
         const decoded = src.startsWith("data:") ? decodeDataUri(src) : null
         if (decoded) {
           filePath = persistImage(decoded.buffer, `pasted.${decoded.ext}`)
+        } else {
+          log("  skip image part without decodable data URI")
         }
       }
 
