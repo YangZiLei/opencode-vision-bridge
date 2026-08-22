@@ -46,7 +46,7 @@ ERROR: Cannot read "image.png" (this model does not support image input).
 | 组件 | 作用 |
 |---|---|
 | `plugins/vision-bridge.mjs` | 插件。`experimental.chat.system.transform` 捕获当前模型的**运行时能力**（`capabilities.input.image`），`messages.transform` 据此判定：纯文本模型把图片 part 替换为带路径的文本 part，视觉模型原样放行 |
-| `plugins/text-models.json` | **兜底**黑名单（支持通配符）。仅在运行时能力缓存未命中时生效——正常情况零维护 |
+| `plugins/text-models.json` | `textModels` **兜底**黑名单 + `forceBridge` 强制桥接覆盖（均支持通配符）。黑名单仅在模态未知/缓存未命中时生效——正常情况零维护 |
 | `agent/vision.md` | vision 子代理，挂载 `opencode/mimo-v2.5-free`（opencode 内置免费多模态模型，零注册零费用） |
 
 ### 关键设计决策 / Key decisions
@@ -107,9 +107,9 @@ ERROR: Cannot read "image.png" (this model does not support image input).
 
 ## 配置 / Configuration
 
-### 兜底黑名单（通常无需修改）
+### 兜底黑名单 `textModels`（通常无需修改）
 
-正常情况插件按模型**运行时能力**判定（`capabilities.input.image`），不依赖名单。黑名单仅在能力缓存未命中的罕见场景兜底。如需强制覆盖某个模型，在 `plugins/text-models.json` 的 `textModels` 数组追加：
+正常情况插件按模型**运行时能力**判定，不依赖名单。黑名单仅在**模态信息未知**（provider 元数据缺失 `input.image`/`attachment` 布尔值）或能力缓存未命中时兜底。在 `plugins/text-models.json` 的 `textModels` 数组追加：
 
 ```json
 {
@@ -123,12 +123,30 @@ ERROR: Cannot read "image.png" (this model does not support image input).
 
 - 支持通配符：`*/deepseek*` 匹配任意 provider 下的 deepseek 系列
 - ⚠️ JSON 数组最后一项后面**不能有逗号**（否则解析失败、黑名单静默失效）
+- 注意：`textModels` **不能**覆盖已上报视觉能力的模型——那类需求用下面的 `forceBridge`
+
+### 强制桥接 `forceBridge`（例外覆盖）
+
+个别模型的元数据**谎报**支持图像（`input.image: true`）但实际经常失败。把这类模型加入 `forceBridge` 数组，插件会无视能力元数据、一律桥接给 vision 子代理：
+
+```json
+{
+  "forceBridge": [
+    "your-provider/broken-vision-model"
+  ]
+}
+```
+
+- 同样支持通配符与精确 `provider/model` 写法；默认 `[]`（空，不覆盖任何模型）
+- 命中 `forceBridge` 的模型同时会收到强制委派规则——两个钩子共用同一判定函数 `decideBridge`，规则注入与桥接行为永远一致
+
+**判定优先级**：`forceBridge` > 运行时能力（模态已知时）> `textModels` 兜底（模态未知时）> 放行。
 
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `VISION_BRIDGE_CONFIG` | `~/.config/opencode/plugins/text-models.json` | 兜底黑名单文件路径 |
+| `VISION_BRIDGE_CONFIG` | `~/.config/opencode/plugins/text-models.json` | 判定配置文件路径（`textModels` 兜底黑名单 + `forceBridge` 强制桥接） |
 | `VISION_BRIDGE_MAX_AGE_HOURS` | `24` | 临时图片保留时长（小时） |
 
 ### 更换视觉子代理模型
@@ -202,12 +220,13 @@ VISION_BRIDGE_DEBUG=1 opencode run -m <your-model> -f <image-path>
 | 日志 | 含义 |
 |---|---|
 | `plugin loaded` | 插件成功加载（若没出现=插件未注册/加载失败） |
-| `injected delegation rule for provider/model` | 已向纯文本模型的 system prompt 注入强制委派规则 |
+| `injected delegation rule for provider/model` | 已向将被桥接的模型的 system prompt 注入强制委派规则（与桥接判定同源） |
 | `transform fired for provider/model` | 钩子被触发，识别到目标模型 |
 | `runtime caps: image input supported, PASS` | 运行时能力判定为视觉模型，放行 |
 | `runtime caps: text-only, BRIDGING image` | 运行时能力判定为纯文本，开始转换 |
-| `not in text blacklist, PASS` | 能力缓存未命中，且不在兜底黑名单，放行 |
-| `in blacklist, BRIDGING image` | 能力缓存未命中，命中兜底黑名单，转换 |
+| `forceBridge match, BRIDGING image` | 命中 `forceBridge` 强制桥接名单（无视能力元数据） |
+| `not in text blacklist (modality unknown or cache miss), PASS` | 模态未知（元数据缺失）或缓存未命中，且不在兜底黑名单，放行 |
+| `in text blacklist, BRIDGING image` | 模态未知或缓存未命中，命中兜底黑名单，转换 |
 | `deduped image` | 检测到重复图片，复用已有文件 |
 | `wrote <path>` | 新图片已写入临时目录 |
 
