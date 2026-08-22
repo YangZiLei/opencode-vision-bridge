@@ -2,15 +2,24 @@ import assert from "node:assert/strict"
 import { rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { fileURLToPath } from "node:url"
 import test, { after } from "node:test"
+import { writeFileSync, mkdirSync } from "node:fs"
 
 // Isolate from the real production temp dir.
 const TEST_RUNTIME = join(tmpdir(), `opencode-vision-test-caps-${Date.now()}`)
 process.env.VISION_BRIDGE_RUNTIME_DIR = TEST_RUNTIME
-process.env.VISION_BRIDGE_CONFIG = fileURLToPath(
-  new URL("../plugins/text-models.json", import.meta.url),
+
+// Dedicated config with an explicit forceBridge entry for the muse model.
+const TEST_CONFIG = join(tmpdir(), `vision-bridge-caps-${Date.now()}.json`)
+writeFileSync(
+  TEST_CONFIG,
+  JSON.stringify({
+    textModels: ["*/deepseek*", "*/hy3*"],
+    forceBridge: ["opencode/muse-spark-1.2-contributor-free"],
+  }),
 )
+process.env.VISION_BRIDGE_CONFIG = TEST_CONFIG
+mkdirSync(TEST_RUNTIME, { recursive: true })
 
 const { VisionBridge } = await import("../plugins/vision-bridge.mjs")
 const hooks = await VisionBridge()
@@ -44,7 +53,10 @@ function filePart(overrides = {}) {
   return { type: "file", mime: "image/png", filename: "x.png", url: image, ...overrides }
 }
 
-after(() => rmSync(TEST_RUNTIME, { recursive: true, force: true }))
+after(() => {
+  rmSync(TEST_RUNTIME, { recursive: true, force: true })
+  rmSync(TEST_CONFIG, { force: true })
+})
 
 test("system.transform injects delegation rule for text-only model", async () => {
   const out = { system: [] }
@@ -102,4 +114,16 @@ test("attachment-capable model gets a consistent single decision", async () => {
   const output = userMsg("custom", "attach-model", [filePart()])
   await transform({}, output)
   assert.equal(output.messages[0].parts[0].type, "file", "attachment-capable model image should pass through")
+})
+
+test("forceBridge forces a vision-capable model to bridge", async () => {
+  // A model whose metadata CLAIMS image support but actually fails on image
+  // input (e.g. some providers). forceBridge in text-models.json must override
+  // capability detection so the vision subagent handles it reliably.
+  await systemTransform({ model: modelObj("opencode", "muse-spark-1.2-contributor-free", caps(true)) }, { system: [] })
+  const output = userMsg("opencode", "muse-spark-1.2-contributor-free", [filePart()])
+  await transform({}, output)
+  assert.equal(output.messages[0].parts[0].type, "text", "forceBridge model image should be bridged")
+  const path = output.messages[0].parts[0].text.match(/\[Image attachment: (.+?) —/)?.[1]
+  assert.ok(path, "bridged text should carry a file path")
 })

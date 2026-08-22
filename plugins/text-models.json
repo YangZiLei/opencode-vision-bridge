@@ -1,7 +1,8 @@
 {
-  "_comment": "Text-only models listed here get images bridged to the vision subagent. Use wildcards like \"*/deepseek*\". No trailing comma after the last item.",
+  "_comment": "textModels = fallback blacklist for text-only models. forceBridge = models whose metadata CLAIMS image support but actually fail on image input (they get bridged to the vision subagent regardless). Use wildcards. No trailing comma after the last item.",
   "textModels": [
     "*/deepseek*",
     "*/hy3*"
-  ]
+  ],
+  "forceBridge": []
 }

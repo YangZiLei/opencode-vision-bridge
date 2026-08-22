@@ -162,16 +162,22 @@ function persistImage(buffer, name) {
 }
 
 let textPatterns = null
+let forceBridgePatterns = null
 
 function loadTextPatterns() {
   if (textPatterns) return textPatterns
   textPatterns = []
+  forceBridgePatterns = []
   try {
     if (existsSync(CONFIG_PATH)) {
       const j = JSON.parse(readFileSync(CONFIG_PATH, "utf8"))
       if (Array.isArray(j?.textModels)) {
         textPatterns = j.textModels.map(String)
         log("loaded", textPatterns.length, "blacklist patterns")
+      }
+      if (Array.isArray(j?.forceBridge)) {
+        forceBridgePatterns = j.forceBridge.map(String)
+        log("loaded", forceBridgePatterns.length, "forceBridge patterns")
       }
     }
   } catch (e) {
@@ -186,7 +192,7 @@ function escapeRegExp(s) {
 
 function matchTextModel(patterns, providerID, modelID) {
   const key = `${providerID}/${modelID}`
-  for (const pat of patterns) {
+  for (const pat of patterns ?? []) {
     if (pat === key) return true
     if (pat.includes("*")) {
       const re = new RegExp("^" + pat.split("*").map(escapeRegExp).join(".*") + "$")
@@ -223,7 +229,9 @@ export const VisionBridge = async () => {
       // Uses the SAME predicate as messages.transform so an attachment-capable
       // model never gets a contradictory "image supported" + "must delegate".
       const caps = input?.model?.capabilities
-      if (caps && !declaresImageInput(caps)) {
+      loadTextPatterns() // ensure forceBridgePatterns initialized
+      const forced = matchTextModel(forceBridgePatterns, input?.model?.providerID, input?.model?.id)
+      if ((caps && !declaresImageInput(caps)) || forced) {
         output.system.push(
           "IMAGE DELEGATION RULE (mandatory): If a user message contains " +
           '"[Image attachment: <file path>]", this model cannot see the image ' +
@@ -247,6 +255,14 @@ export const VisionBridge = async () => {
 
       const modelKey = `${targetModel.providerID}/${targetModel.modelID}`
       log("transform fired for", modelKey)
+
+      // Force-bridge models whose metadata CLAIMS image support but which
+      // actually fail on image input (e.g. muse-spark-1.2). This overrides
+      // capability detection so the vision subagent handles them reliably.
+      if (matchTextModel(forceBridgePatterns, targetModel.providerID, targetModel.modelID)) {
+        log("  forceBridge match, BRIDGING image")
+        return bridgeImageParts(output)
+      }
 
       // Primary decision: runtime capabilities captured from
       // system.transform for THIS provider/model. Zero-config — no
