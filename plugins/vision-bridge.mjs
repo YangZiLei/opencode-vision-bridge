@@ -61,6 +61,30 @@ let lastCleanTime = 0
 // Content-hash dedup cache: repeated pastes of the same image reuse one file.
 const hashIndex = new Map() // sha256 -> path
 
+// Model capability cache, populated by the experimental.chat.system.transform
+// hook which receives the FULL Model object (info.model in messages.transform
+// only carries {providerID, modelID}). Keyed "providerID/id" so concurrent
+// sessions can't cross-contaminate: messages.transform only trusts a cached
+// entry whose key matches the request's own model.
+const CAPS_CACHE_MAX = 50
+const capsCache = new Map() // "providerID/id" -> capabilities object
+
+function rememberCaps(model) {
+  const caps = model?.capabilities
+  if (!caps || !model?.providerID || !model?.id) return
+  const key = `${model.providerID}/${model.id}`
+  capsCache.delete(key)
+  capsCache.set(key, caps)
+  if (capsCache.size > CAPS_CACHE_MAX) {
+    capsCache.delete(capsCache.keys().next().value)
+  }
+}
+
+/** True when the model's runtime metadata says it accepts image input. */
+function declaresImageInput(caps) {
+  return caps?.input?.image === true || caps?.attachment === true
+}
+
 /** Delete temp images older than MAX_AGE_MS. Throttled to once per 3 days. */
 function cleanOldImages() {
   const now = Date.now()
@@ -181,6 +205,24 @@ function decodeDataUri(dataUri) {
 export const VisionBridge = async () => {
   log("plugin loaded")
   return {
+    // Fires before messages.transform on every LLM call with the FULL Model
+    // object — our source of runtime truth for input modality.
+    "experimental.chat.system.transform": async (input, output) => {
+      rememberCaps(input?.model)
+      // Text-only models get a mandatory delegation rule. The bridged text
+      // part alone is advisory and weak models (e.g. big-pickle) ignore it.
+      const caps = input?.model?.capabilities
+      if (caps && caps.input?.image !== true) {
+        output.system.push(
+          "IMAGE DELEGATION RULE (mandatory): If a user message contains " +
+          '"[Image attachment: <file path>]", this model cannot see the image ' +
+          "directly. You MUST use the task tool to invoke the 'vision' subagent " +
+          "with that file path, receive its description, and answer based on it. " +
+          "Never reply that you cannot see images — always delegate instead."
+        )
+        log("  injected delegation rule for", `${input.model.providerID}/${input.model.id}`)
+      }
+    },
     "experimental.chat.messages.transform": async (_input, output) => {
       // Resolve the target model from the last user message
       let targetModel = null
@@ -192,67 +234,83 @@ export const VisionBridge = async () => {
       }
       if (!targetModel?.providerID || !targetModel?.modelID) return
 
-      log("transform fired for", `${targetModel.providerID}/${targetModel.modelID}`)
+      const modelKey = `${targetModel.providerID}/${targetModel.modelID}`
+      log("transform fired for", modelKey)
 
-      // Model explicitly declares image capability -> never bridge
-      if (
-        targetModel.capabilities?.input?.image === true ||
-        targetModel.modalities?.input?.includes("image") === true
-      ) {
-        log("  model declares image capability, PASS")
-        return
+      // Primary decision: runtime capabilities captured from
+      // system.transform for THIS provider/model. Zero-config — no
+      // blacklist maintenance needed.
+      const caps = capsCache.get(modelKey)
+      if (caps) {
+        if (declaresImageInput(caps)) {
+          log("  runtime caps: image input supported, PASS")
+          return
+        }
+        log("  runtime caps: text-only, BRIDGING image")
+        return bridgeImageParts(output)
       }
 
-      // Not in the text-only blacklist -> native pass-through
+      // Fallback (cache miss): legacy blacklist behavior so bridging still
+      // works if the hook order ever changes or state was evicted.
+      const capsFromMsg =
+        targetModel.capabilities?.input?.image === true ||
+        targetModel.modalities?.input?.includes("image") === true
+      if (capsFromMsg) {
+        log("  msg carries image capability, PASS")
+        return
+      }
       if (!matchTextModel(loadTextPatterns(), targetModel.providerID, targetModel.modelID)) {
         log("  not in text blacklist, PASS")
         return
       }
+      log("  in text blacklist, BRIDGING image")
+      bridgeImageParts(output)
+    },
+  }
+}
 
-      // In blacklist -> replace image parts with text (path) parts
-      log("  in blacklist, BRIDGING image")
-      cleanOldImages()
-      try {
-        mkdirSync(RUNTIME_DIR, { recursive: true })
-      } catch {}
+/** Replace every image part across all messages with a path-bearing text part. */
+function bridgeImageParts(output) {
+  cleanOldImages()
+  try {
+    mkdirSync(RUNTIME_DIR, { recursive: true })
+  } catch {}
 
-      for (const msg of output.messages) {
-        for (const part of msg.parts) {
-          const p = part
-          let filePath = ""
+  for (const msg of output.messages) {
+    for (const part of msg.parts) {
+      const p = part
+      let filePath = ""
 
-          if (part.type === "file" && IMAGE_MIME_RE.test(String(p.mime ?? ""))) {
-            if (p.path) {
-              filePath = p.path
-            } else if (String(p.url ?? "").startsWith("data:")) {
-              const decoded = decodeDataUri(String(p.url))
-              if (decoded) {
-                const name = String(p.filename ?? `pasted-${Date.now()}`).replace(/[^\w.\-]/g, "_")
-                filePath = persistImage(decoded.buffer, name)
-              }
-            }
-          } else if (part.type === "image") {
-            const src = String(p.image ?? "")
-            const decoded = src.startsWith("data:") ? decodeDataUri(src) : null
-            if (decoded) {
-              filePath = persistImage(decoded.buffer, `pasted.${decoded.ext}`)
-            }
+      if (part.type === "file" && IMAGE_MIME_RE.test(String(p.mime ?? ""))) {
+        if (p.path) {
+          filePath = p.path
+        } else if (String(p.url ?? "").startsWith("data:")) {
+          const decoded = decodeDataUri(String(p.url))
+          if (decoded) {
+            const name = String(p.filename ?? `pasted-${Date.now()}`).replace(/[^\w.\-]/g, "_")
+            filePath = persistImage(decoded.buffer, name)
           }
-
-          if (!filePath) continue
-
-          part.type = "text"
-          delete p.mime
-          delete p.path
-          delete p.file
-          delete p.image
-          delete p.url
-          delete p.filename
-          p.text =
-            `[Image attachment: ${filePath} — main model does not support image input, ` +
-            `call the vision subagent to recognize this image before continuing]`
+        }
+      } else if (part.type === "image") {
+        const src = String(p.image ?? "")
+        const decoded = src.startsWith("data:") ? decodeDataUri(src) : null
+        if (decoded) {
+          filePath = persistImage(decoded.buffer, `pasted.${decoded.ext}`)
         }
       }
-    },
+
+      if (!filePath) continue
+
+      part.type = "text"
+      delete p.mime
+      delete p.path
+      delete p.file
+      delete p.image
+      delete p.url
+      delete p.filename
+      p.text =
+        `[Image attachment: ${filePath} — main model does not support image input, ` +
+        `call the vision subagent to recognize this image before continuing]`
+    }
   }
 }

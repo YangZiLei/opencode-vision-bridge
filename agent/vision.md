@@ -7,6 +7,7 @@ permission:
   edit: deny
   webfetch: deny
   skill: deny
+  external_directory: allow
 ---
 
 You are the "image recognition" subagent, a multimodal model specialized in image understanding.

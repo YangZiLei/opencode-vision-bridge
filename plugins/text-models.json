@@ -1,6 +1,7 @@
 {
   "_comment": "Text-only models listed here get images bridged to the vision subagent. Use wildcards like \"*/deepseek*\". No trailing comma after the last item.",
   "textModels": [
-    "*/deepseek*"
+    "*/deepseek*",
+    "*/hy3*"
   ]
 }

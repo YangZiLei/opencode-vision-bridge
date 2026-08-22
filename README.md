@@ -15,7 +15,7 @@ ERROR: Cannot read "image.png" (this model does not support image input).
 
 这不是配置问题，而是模型的**架构限制**——纯文本模型没有视觉神经元。市面上已有的方案（MCP 视觉服务器、OCR 工具）大多要求额外的 API Key、本地服务或部署步骤，且无法解决"图片在消息装配阶段就被 opencode 拦截"这一核心卡点。
 
-**本项目用最轻量的方式解决：一个插件 + 一个子代理 + 一份黑名单。**
+**本项目用最轻量的方式解决：一个插件 + 一个子代理，按模型运行时能力自动判定。**
 
 ## 设计思路 / Design
 
@@ -24,18 +24,20 @@ ERROR: Cannot read "image.png" (this model does not support image input).
 │  用户     │ ─────────────▶ │  opencode 消息装配    │
 └──────────┘                 └──────────┬──────────┘
                                         │
-                        vision-bridge.mjs 插件（transform 钩子）
+                        vision-bridge.mjs 插件
+                        （system.transform 捕获模型能力
+                         + messages.transform 桥接图片）
                                         │
               ┌─────────────────────────┴──────────────────────┐
-              │ 模型在纯文本黑名单？                            │
-              │ 是 → 图片 part 转成"图片路径"文本 part          │
-              │ 否 → 原样放行（视觉模型直接看图）               │
+              │ 运行时能力：capabilities.input.image            │
+              │ false（纯文本）→ 图片转"路径"文本 part          │
+              │ true（视觉）→ 原样放行直接看图                 │
               └─────────────────────────┬──────────────────────┘
                                         │
                  ┌──────────────────────┴──────────────┐
                  ▼                                     ▼
-  主模型收到路径文本                           视觉模型收到图片
-  → 调用 vision 子代理 (MiMo V2.5)              → 直接理解图片
+  主模型收到路径文本 + 系统强制委派规则          视觉模型收到图片
+  → 调用 vision 子代理 (MiMo V2.5)               → 直接理解图片
   → 子代理 Read 图片 → 返回描述
 ```
 
@@ -43,18 +45,19 @@ ERROR: Cannot read "image.png" (this model does not support image input).
 
 | 组件 | 作用 |
 |---|---|
-| `plugins/vision-bridge.mjs` | 插件。在 `experimental.chat.messages.transform` 钩子中，仅对**黑名单内的纯文本模型**把图片 part 替换为带路径的文本 part |
-| `plugins/text-models.json` | 纯文本模型黑名单（支持通配符）。黑名单外的模型一律原样放行 |
+| `plugins/vision-bridge.mjs` | 插件。`experimental.chat.system.transform` 捕获当前模型的**运行时能力**（`capabilities.input.image`），`messages.transform` 据此判定：纯文本模型把图片 part 替换为带路径的文本 part，视觉模型原样放行 |
+| `plugins/text-models.json` | **兜底**黑名单（支持通配符）。仅在运行时能力缓存未命中时生效——正常情况零维护 |
 | `agent/vision.md` | vision 子代理，挂载 `opencode/mimo-v2.5-free`（opencode 内置免费多模态模型，零注册零费用） |
 
 ### 关键设计决策 / Key decisions
 
-1. **黑名单而非白名单**：默认只桥接已知纯文本模型（DeepSeek），其余模型全部放行。好处是视觉模型永远不会被误转；遇到新的纯文本模型只需在黑名单加一行。
-2. **覆盖粘贴场景**：TUI 里 Ctrl+V 粘贴的图片是 base64 data URI（无磁盘路径），插件会解码写入临时目录 `%TEMP%/opencode-vision/` 再引用路径。
-3. **自动维护临时目录**：
+1. **能力检测为主、黑名单兜底**：每次请求通过 `system.transform` 拿到当前模型的 `capabilities.input.image`，纯文本即桥接、视觉即放行——**无需手动维护名单**，模型目录怎么变都自动适配。仅当缓存未命中时回退到黑名单，保证弱模型环境下依旧可用。
+2. **系统强制委派规则**：光把图片换成路径文本，部分模型（如 big-pickle）会无视内联指令、直接回复"我看不了图"。插件在 `system.transform` 里向纯文本模型的 system prompt 注入**强制规则**：遇到 `[Image attachment: ...]` 必须调用 vision 子代理，不许拒绝。
+3. **覆盖粘贴场景**：TUI 里 Ctrl+V 粘贴的图片是 base64 data URI（无磁盘路径），插件会解码写入临时目录 `%TEMP%/opencode-vision/` 再引用路径。
+4. **自动维护临时目录**：
    - 图片超过 24 小时后删除；清理任务最多每 3 天执行一次（`VISION_BRIDGE_MAX_AGE_HOURS` 可调）
-   - SHA-256 内容哈希去重，同一张图重复粘贴只保留一份
-4. **零依赖、零配置项之外**：纯 JS ESM 插件，无 npm 依赖；黑名单路径可用 `VISION_BRIDGE_CONFIG` 环境变量覆盖。
+   - SHA-256 内容哈希去重，同一张图重复粘贴只保留一份（含并发 transform 的索引回填）
+5. **零依赖、零配置项之外**：纯 JS ESM 插件，无 npm 依赖；兜底黑名单路径可用 `VISION_BRIDGE_CONFIG` 环境变量覆盖。
 
 ## Requirements
 
@@ -98,20 +101,21 @@ opencode 对全局 `plugins/` 目录下的文件**不会自动发现**，必须�
 直接**粘贴图片**（Ctrl+V）或**拖拽图片**，然后正常提问：
 
 - 视觉模型（qwen3.x、MiMo、Claude、GPT、glm-5v-turbo 等）→ 直接看图
-- 黑名单内的纯文本模型（DeepSeek、GLM-5.x）→ 自动派给 vision 子代理识别
+- 纯文本模型（DeepSeek、GLM-5.x、big-pickle 等）→ 自动判定并派给 vision 子代理识别
 
-无需任何特殊指令。
+无需任何特殊指令，也**无需配置黑名单**（能力检测自动生效）。
 
 ## 配置 / Configuration
 
-### 扩展黑名单
+### 兜底黑名单（通常无需修改）
 
-遇到新的纯文本模型报 "does not support image input" 时，在 `plugins/text-models.json` 的 `textModels` 数组追加：
+正常情况插件按模型**运行时能力**判定（`capabilities.input.image`），不依赖名单。黑名单仅在能力缓存未命中的罕见场景兜底。如需强制覆盖某个模型，在 `plugins/text-models.json` 的 `textModels` 数组追加：
 
 ```json
 {
   "textModels": [
     "*/deepseek*",
+    "*/hy3*",
     "your-provider/your-model"
   ]
 }
@@ -124,7 +128,7 @@ opencode 对全局 `plugins/` 目录下的文件**不会自动发现**，必须�
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `VISION_BRIDGE_CONFIG` | `~/.config/opencode/plugins/text-models.json` | 黑名单文件路径 |
+| `VISION_BRIDGE_CONFIG` | `~/.config/opencode/plugins/text-models.json` | 兜底黑名单文件路径 |
 | `VISION_BRIDGE_MAX_AGE_HOURS` | `24` | 临时图片保留时长（小时） |
 
 ### 更换视觉子代理模型
@@ -187,10 +191,10 @@ VISION_BRIDGE_DEBUG=1 opencode run -m <your-model> -f <image-path>
 
 ```
 [vision-bridge] plugin loaded
-[vision-bridge] loaded 1 blacklist patterns
-[vision-bridge] transform fired for opencode/deepseek-v4-flash-free
-[vision-bridge]   in blacklist, BRIDGING image
-[vision-bridge]   wrote C:\Users\...\1785912345678-abc-image.png
+[vision-bridge] injected delegation rule for opencode/big-pickle
+[vision-bridge] transform fired for opencode/big-pickle
+[vision-bridge]   runtime caps: text-only, BRIDGING image
+[vision-bridge]   deduped image -> /var/folders/.../opencode-vision/1785912345678-abc-image.png
 ```
 
 关键日志含义：
@@ -198,11 +202,12 @@ VISION_BRIDGE_DEBUG=1 opencode run -m <your-model> -f <image-path>
 | 日志 | 含义 |
 |---|---|
 | `plugin loaded` | 插件成功加载（若没出现=插件未注册/加载失败） |
-| `loaded N blacklist patterns` | 黑名单读取成功（0 = JSON 解析失败或文件不存在） |
+| `injected delegation rule for provider/model` | 已向纯文本模型的 system prompt 注入强制委派规则 |
 | `transform fired for provider/model` | 钩子被触发，识别到目标模型 |
-| `model declares image capability, PASS` | 模型自带视觉，放行 |
-| `not in text blacklist, PASS` | 不在黑名单，放行 |
-| `in blacklist, BRIDGING image` | 命中黑名单，开始转换 |
+| `runtime caps: image input supported, PASS` | 运行时能力判定为视觉模型，放行 |
+| `runtime caps: text-only, BRIDGING image` | 运行时能力判定为纯文本，开始转换 |
+| `not in text blacklist, PASS` | 能力缓存未命中，且不在兜底黑名单，放行 |
+| `in blacklist, BRIDGING image` | 能力缓存未命中，命中兜底黑名单，转换 |
 | `deduped image` | 检测到重复图片，复用已有文件 |
 | `wrote <path>` | 新图片已写入临时目录 |
 
@@ -212,7 +217,10 @@ VISION_BRIDGE_DEBUG=1 opencode run -m <your-model> -f <image-path>
 A: 免费模型是 opencode 内置的，一般都有。若没有，按上文"更换视觉子代理模型"处理。
 
 **Q: 插件没生效？**
-A: 检查：① `plugin` 数组是否显式注册（必须，不会自动发现）；② 是否重启了 opencode；③ 黑名单 JSON 是否合法（尾逗号会导致静默失效）。
+A: 检查：① `plugin` 数组是否显式注册（必须，不会自动发现）；② 是否重启了 opencode；③ `agent/vision.md` 是否就位；④ 若仍未委派，确认版本 ≥ v1.1.0（含 system 强制规则），旧版只能靠黑名单 + 模型自觉。
+
+**Q: 主模型还是回复"我看不了图"、不调用子代理？**
+A: 新版已注入强制委派规则，正常不会再出现。若仍有，请确认完全重启 opencode（桌面端需退出整个应用而非关窗口），并检查是否用了旧版插件文件。
 
 **Q: 图片会被存到哪里？会不会越堆越多？**
 A: 存在 `%TEMP%/opencode-vision/`。图片超过 24 小时后会删除，清理任务最多每 3 天执行一次；内容哈希去重会让同一张图只保留一份。
