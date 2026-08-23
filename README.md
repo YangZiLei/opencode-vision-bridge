@@ -17,6 +17,69 @@ ERROR: Cannot read "image.png" (this model does not support image input).
 
 **本项目用最轻量的方式解决：一个插件 + 一个子代理，按模型运行时能力自动判定。**
 
+## 安装 / Installation
+
+> 一条命令完成安装与注册，无需手动复制文件、无需手动改配置。
+> One command installs and registers everything — no manual file copying or config editing.
+
+### 一键安装（npx）/ One-command install (npx)
+
+本地已 clone 本仓库（或持有本地路径）时，用 `npx` 直接执行安装器：
+
+```bash
+# 全局安装（默认）：安装到 ~/.config/opencode/ 并写入全局 opencode 配置
+npx /path/to/opencode-vision-bridge install --global
+
+# 项目级安装：安装到当前项目 .opencode/ 并写入项目 opencode.json
+npx /path/to/opencode-vision-bridge install --local
+
+# 跳过所有交互确认（CI / 自动化场景）
+npx /path/to/opencode-vision-bridge install --global --yes
+
+# 卸载
+npx /path/to/opencode-vision-bridge uninstall --global
+```
+
+安装器特性：
+
+- **幂等**：重复执行 install 不会产生重复的插件条目或文件
+- **安全卸载**：`uninstall` 只删除安装器自己放置的文件；你手动改过的 `text-models.json`（黑名单）或 `vision.md`（如更换过模型）会原样保留
+- **无需手动注册**：插件路径自动写入 `opencode.json` / `opencode.jsonc` 的 `plugin` 数组
+- 安装完成后会打印验证方法（如何确认插件已生效）
+
+<details>
+<summary>手动安装 / Manual install（不推荐，高级用户）</summary>
+
+### 1. 复制文件
+
+将 `plugins/` 和 `agent/` 两个目录下的文件复制到你的 opencode 配置目录：
+
+- **Windows**: `C:\Users\<你的用户名>\.config\opencode\`
+- **macOS / Linux**: `~/.config/opencode/`
+
+（`plugins` 或 `agent` 文件夹不存在就手动新建）
+
+### 2. 注册插件（必须）
+
+推荐在 `opencode.json` 的 `plugin` 数组中**显式声明**插件路径（最稳妥，不依赖版本行为差异）：
+
+```json
+{
+  "plugin": [
+    "C:\\Users\\<你的用户名>\\.config\\opencode\\plugins\\vision-bridge.mjs"
+  ]
+}
+```
+
+> 如果 `plugin` 数组已有其他条目（如 `@cortexkit/opencode-magic-context@latest`），把新条目追加进去即可。
+
+### 3. 重启 opencode
+
+配置只在启动时加载。桌面版需要完全退出后重新打开，并新建一个会话；
+仅关闭当前聊天窗口或最小化应用不会重新加载插件。
+
+</details>
+
 ## 设计思路 / Design
 
 ```
@@ -65,36 +128,6 @@ ERROR: Cannot read "image.png" (this model does not support image input).
   `experimental.chat.messages.transform` hook.
 - No separate Node.js installation is required when the plugin is loaded by
   opencode; it uses standard ESM and Node-compatible built-ins.
-
-## 安装 / Installation
-
-### 1. 复制文件
-
-将 `plugins/` 和 `agent/` 两个目录下的文件复制到你的 opencode 配置目录：
-
-- **Windows**: `C:\Users\<你的用户名>\.config\opencode\`
-- **macOS / Linux**: `~/.config/opencode/`
-
-（`plugins` 或 `agent` 文件夹不存在就手动新建）
-
-### 2. 注册插件（必须）
-
-推荐在 `opencode.json` 的 `plugin` 数组中**显式声明**插件路径（最稳妥，不依赖版本行为差异）：
-
-```json
-{
-  "plugin": [
-    "C:\\Users\\<你的用户名>\\.config\\opencode\\plugins\\vision-bridge.mjs"
-  ]
-}
-```
-
-> 如果 `plugin` 数组已有其他条目（如 `@cortexkit/opencode-magic-context@latest`），把新条目追加进去即可。
-
-### 3. 重启 opencode
-
-配置只在启动时加载。桌面版需要完全退出后重新打开，并新建一个会话；
-仅关闭当前聊天窗口或最小化应用不会重新加载插件。
 
 ## 使用 / Usage
 
