@@ -274,6 +274,14 @@ function unregisterPlugin(configFile, pluginPath) {
   const before = json.plugin.length
   json.plugin = json.plugin.filter((p) => !pluginMatches(p, pluginPath, dirname(configFile)))
   if (json.plugin.length === before) return { removed: false, hadConfig: true }
+  // If nothing meaningful remains (no other keys, plugin array now empty),
+  // the file was almost certainly created by this installer — remove it so
+  // uninstall leaves zero residue. Configs with any other content are kept.
+  const keys = Object.keys(json)
+  if (keys.length === 1 && json.plugin.length === 0) {
+    rmSync(configFile, { force: true })
+    return { removed: true, hadConfig: true, removedConfigFile: true }
+  }
   writeConfig(configFile, json)
   return { removed: true, hadConfig: true }
 }
@@ -377,9 +385,11 @@ async function uninstall(opts) {
   const unreg = unregisterPlugin(target.configFile, pluginPath)
   if (unreg.hadConfig) {
     console.log(
-      unreg.removed
-        ? `  [ok] removed plugin entry from ${target.configFile}`
-        : `  [skip] no plugin entry found in ${target.configFile}`
+      unreg.removedConfigFile
+        ? `  [ok] removed plugin entry from ${target.configFile} (file had nothing else — removed)`
+        : unreg.removed
+          ? `  [ok] removed plugin entry from ${target.configFile}`
+          : `  [skip] no plugin entry found in ${target.configFile}`
     )
   } else {
     console.log(`  [skip] no config file at ${target.configFile}`)
