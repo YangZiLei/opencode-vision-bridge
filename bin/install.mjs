@@ -93,9 +93,6 @@ function parseArgs(argv) {
         return { error: `unknown argument: ${a}` }
     }
   }
-  if (command === "uninstall" && !yes) {
-    // fine — uninstall will prompt separately
-  }
   return { command, scope, yes }
 }
 
