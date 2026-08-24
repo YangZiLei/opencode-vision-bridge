@@ -224,6 +224,38 @@ npx /path/to/opencode-vision-bridge uninstall --global
 - 图片二进制不会由本项目永久保存；桥接后的文件路径会作为文本进入模型上下文/聊天历史。
 - 图片最终会发送给视觉模型 API（默认是 opencode 内置免费 MiMo 云服务），敏感截图请自行斟酌。
 
+## 免责声明 / Disclaimer
+
+**非官方项目 / Not an official project**
+
+本项目是独立第三方项目，与 opencode（anomalyco）、DeepSeek、小米（MiMo）等组织及其产品**无任何隶属、背书或合作关系**；本项目作者不对其行为负责。
+
+> This project is an independent third-party project with **no affiliation, endorsement, or partnership** with opencode (anomalyco), DeepSeek, Xiaomi (MiMo), or their products; the authors are not responsible for their conduct.
+
+**商标 / Trademarks**
+
+README 中出现的所有产品名称、商标与服务标记均为**各自所有者的财产**，此处仅用于描述兼容性与用途（nominative use），不构成任何授权、赞助或关联声明。
+
+> All product names, trademarks, and service marks appearing in this README are the **property of their respective owners**, used solely to describe compatibility and intended use — no authorization, sponsorship, or association is implied.
+
+**上游服务 / Upstream services**
+
+本项目依赖 opencode 内置免费模型（如 `opencode/mimo-v2.5-free`）等上游服务。其可用性、额度与条款可能随时调整或终止；本项目不保证其持续可用，也不承担因上游变更导致的任何损失。
+
+> This project relies on upstream services such as opencode's built-in free models (e.g. `opencode/mimo-v2.5-free`). Their availability, quotas, and terms may change or be discontinued at any time; this project does not guarantee continued availability and is not liable for any resulting loss.
+
+**数据与合规 / Data & compliance**
+
+经本插件桥接的图片会被发送至视觉模型 API（默认 opencode 免费 MiMo 云服务），**处理敏感内容前请自行评估合规风险**；本项目本身不收集任何用户数据，无遥测。
+
+> Images bridged through this plugin are sent to the vision model API (by default opencode's free MiMo cloud service). **Assess compliance risks yourself before handling sensitive content**; this project collects no user data and has no telemetry.
+
+**按现状提供 / AS-IS**
+
+本软件按「现状」（AS-IS）提供，作者不对其适用性、可靠性或准确性作任何明示或默示担保，详见 [LICENSE](LICENSE)。
+
+> The software is provided "AS IS" without warranty of any kind, express or implied, as detailed in [LICENSE](LICENSE).
+
 ## 调试 / Debugging
 
 插件默认静默运行。遇到问题时，开启调试日志查看完整决策流程：
